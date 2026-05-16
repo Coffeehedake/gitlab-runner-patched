@@ -17,7 +17,10 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Docker registry tags must be all-lowercase. github.repository is
+  # "Coffeehedake/gitlab-runner-patched" (capital C) which fails validation,
+  # so we hardcode the lowercased form here.
+  IMAGE_NAME: coffeehedake/gitlab-runner-patched
 
 jobs:
   build:
