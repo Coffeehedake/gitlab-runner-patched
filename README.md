@@ -63,4 +63,6 @@ Upstream issue: <https://gitlab.com/gitlab-org/gitlab/-/work_items/585221> (open
 
 ## License
 
-MIT. See `LICENSE`.
+This repository (the Dockerfile, GitHub Actions workflow, and documentation) is licensed under **MIT** — see [`LICENSE`](LICENSE).
+
+The MIT license applies only to the *files in this repo*. The Docker image produced and published to GHCR bundles many other components, each carrying its own license: GitLab CE (MIT/Apache 2.0), PostgreSQL (PostgreSQL License), Redis (terms depend on the version omnibus ships), Node.js (MIT), Ruby gems (mostly MIT or Ruby License), and the `gitlab-runner` static binary (MIT). Consumers of the published image are still bound by every one of those component licenses; nothing in this repository's MIT grant changes that.
