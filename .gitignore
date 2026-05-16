@@ -1,0 +1,12 @@
+# Editor / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Anything resembling secrets — defense in depth, this repo has no source-side secrets
+*.env
+.env.*
+*.pem
+*.key
