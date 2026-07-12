@@ -56,3 +56,25 @@ RUN curl -fsSL https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/
         -o /usr/local/bin/gitlab-runner \
  && chmod +x /usr/local/bin/gitlab-runner \
  && /usr/local/bin/gitlab-runner --version
+
+# ---- Layer 5: supervise the in-container runner + self-heal its runit symlink ---
+# The runner binary alone isn't enough. omnibus rebuilds /opt/gitlab/service on every
+# boot (via `gitlab-ctl reconfigure` inside /assets/init-container) and only recreates
+# the services it knows about (puma, sidekiq, ...), NOT our custom runner. runsvdir only
+# supervises services symlinked into /opt/gitlab/service, so without a re-link the runner
+# never starts and ALL CI silently stalls at `pending` after a reboot.
+#
+# Fix: ship the runit service, plus a FAIL-OPEN CMD shim that re-links it into
+# /opt/gitlab/service after reconfigure and keeps it linked. The shim always exec's the
+# real entrypoint, so it can never stop GitLab from booting. Runner config (registered
+# runners + tokens) lives on the bind-mounted /etc/gitlab-runner, so it survives redeploys.
+# See fatalexception/gitlab-ce -> docs/ci-runner.md.
+COPY runit/gitlab-runner/ /opt/gitlab/sv/gitlab-runner/
+COPY assets/link-runner-service.sh /usr/local/bin/link-runner-service.sh
+RUN chmod +x /opt/gitlab/sv/gitlab-runner/run \
+             /opt/gitlab/sv/gitlab-runner/log/run \
+             /usr/local/bin/link-runner-service.sh
+
+# Base image CMD is ["/assets/init-container"]; wrap it so the linker runs alongside boot.
+# NOTE: do NOT override the container command in the Unraid template, or this shim is bypassed.
+CMD ["/usr/local/bin/link-runner-service.sh"]

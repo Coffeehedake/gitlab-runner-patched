@@ -1,0 +1,5 @@
+#!/bin/bash
+# runit service: the in-container GitLab CI runner (shell executor).
+# Config (registered runners + tokens) lives on the bind-mounted /etc/gitlab-runner,
+# so it survives image redeploys. If the config is absent the runner just idles.
+exec gitlab-runner run --config /etc/gitlab-runner/config.toml

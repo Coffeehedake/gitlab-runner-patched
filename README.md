@@ -56,10 +56,37 @@ Workarounds (any one of these is enough):
 
 Upstream issue: <https://gitlab.com/gitlab-org/gitlab/-/work_items/585221> (open, no assignee as of 2026-05).
 
+## CI runner auto-start (self-healing across reboots)
+
+The bundled `gitlab-runner` runs **in-container** with the `shell` executor. Getting it to
+*stay* running across restarts is the tricky part, and this image handles it:
+
+- Ships a **runit service** at `/opt/gitlab/sv/gitlab-runner` (`run` + `log/run`).
+- Ships a **fail-open CMD shim** (`/usr/local/bin/link-runner-service.sh`, the image's `CMD`)
+  that backgrounds a linker and then `exec`s the stock `/assets/init-container`.
+
+Why the shim is needed: omnibus rebuilds `/opt/gitlab/service/` on every boot (via
+`gitlab-ctl reconfigure`) and only recreates the services it knows about (`puma`, `sidekiq`,
+…), **not** the custom runner. `runsvdir` only supervises what's symlinked there, so without a
+re-link the runner never starts and **all CI silently stalls at `pending`** after a reboot.
+The shim keeps `/opt/gitlab/service/gitlab-runner` symlinked in, so `runsvdir` supervises it.
+It's fail-open — the linker runs in an isolated subshell and the shim always `exec`s the real
+entrypoint, so it can never prevent GitLab from booting.
+
+You still **register** your runner once (`gitlab-runner register …`). Put `config.toml` on a
+**bind-mounted `/etc/gitlab-runner/`** so the registration survives image redeploys.
+
+> **If you set the container's command** (Unraid "Post Arguments", compose `command:`, or
+> `docker run … <cmd>`), you override the image `CMD` and bypass the shim — leave the command
+> unset so `/usr/local/bin/link-runner-service.sh` runs.
+
+Background + full ops runbook: `fatalexception/gitlab-ce` → `docs/ci-runner.md` (on the
+self-hosted GitLab).
+
 ## What this image is NOT
 
 - It does **not** modify GitLab Rails itself, change defaults, or ship any patches that affect behavior beyond installing the missing dependencies.
-- It does **not** register the bundled `gitlab-runner` automatically — bring your own auth token and run `gitlab-runner register --config /etc/gitlab/gitlab-runner/config.toml --token glrt-...` against your own GitLab instance, then start it (e.g. via a bind-mounted runit unit or `nohup` from a one-shot script).
+- It does **not** register the bundled `gitlab-runner` for you — bring your own auth token and run `gitlab-runner register --config /etc/gitlab-runner/config.toml --token glrt-...` against your own GitLab instance. **Starting/supervising it, however, IS handled** (see below).
 
 ## License
 

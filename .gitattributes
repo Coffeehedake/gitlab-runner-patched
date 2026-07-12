@@ -1,0 +1,6 @@
+# Shell scripts and runit service files must stay LF so the shebang works on Linux
+# (they're COPYed into the image and executed there).
+*.sh text eol=lf
+assets/** text eol=lf
+runit/** text eol=lf
+Dockerfile text eol=lf

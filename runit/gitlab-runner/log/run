@@ -1,0 +1,5 @@
+#!/bin/bash
+# runit log service for gitlab-runner. Writes to /opt/gitlab/sv/gitlab-runner/log/current
+# (matches the path referenced in docs/ci-runner.md). Best-effort; if svlogd is missing the
+# main runner service is unaffected.
+exec /opt/gitlab/embedded/bin/svlogd -tt /opt/gitlab/sv/gitlab-runner/log
