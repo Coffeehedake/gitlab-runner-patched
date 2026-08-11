@@ -79,27 +79,37 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && rm -rf /var/lib/apt/lists/*
 
 # ---- Layer 4: gdk-toogle gem (omnibus 18.11.3 packaging fix) -----------------
-# NOTE (2026-08): this MUST be --conservative --minimal-deps.
+# NOTE (2026-08): this MUST be --ignore-dependencies.
 #
-# Ruby 3.3 ships `prism` as a DEFAULT gem, and omnibus's embedded Ruby ships no
-# development headers. A plain `gem install` resolves dependencies to their
-# newest versions, decides to upgrade prism (1.9.0 has no precompiled gem for
-# any platform -- every release is source-only), and dies with:
+# gdk-toogle is only needed because it appears in GitLab 18.11.3's
+# Gemfile.lock while being absent from the omnibus image -- Puma will not boot
+# without the gem being *present*. Its declared runtime dependencies (rails,
+# haml) are already satisfied by GitLab itself, which is a Rails application.
+#
+# Resolving them anyway is both unnecessary and actively harmful:
+#
+#   gdk-toogle -> rails -> railties -> irb -> repl_type_completor -> prism
+#
+# and every prism release is source-only (no precompiled gem for any platform).
+# Omnibus's embedded Ruby ships no development headers, so building it fails:
 #
 #     mkmf.rb can't find header files for ruby at
 #     /opt/gitlab/embedded/lib/ruby/include/ruby.h
 #
-# It is not a missing compiler -- adding build-essential does not fix it. The
-# embedded Ruby simply has no ruby.h to compile an extension against.
+# This is NOT a missing compiler -- build-essential does not fix it; there is
+# no ruby.h to compile against. --conservative does not fix it either, because
+# the resolver still walks into that dependency chain.
 #
-# --conservative keeps any already-installed gem that satisfies the requirement
-# (the bundled prism, and GitLab's own rails tree) instead of upgrading it, and
-# --minimal-deps installs only genuinely missing dependencies. Together they
-# stop the resolver reaching for a source-only prism, and as a bonus stop this
-# layer quietly pulling a newer Rails underneath GitLab.
+# Worse, resolving the closure means this layer is free to install a SECOND,
+# newer Rails underneath a running GitLab. Installing just the gem is both the
+# fix and the correct behaviour.
+#
+# The `gem list` assertion afterwards fails the build loudly if the gem did not
+# actually land, so a silent no-op here can never reach production.
 RUN /opt/gitlab/embedded/bin/gem install gdk-toogle -v 0.9.5 --no-document \
-        --conservative --minimal-deps \
- && /opt/gitlab/embedded/bin/gem list gdk-toogle | grep gdk-toogle
+        --ignore-dependencies \
+ && /opt/gitlab/embedded/bin/gem list gdk-toogle | grep -q gdk-toogle \
+ && echo "gdk-toogle installed and verified"
 
 # ---- Layer 5: gitlab-runner static binary -----------------------------------
 # (Lives at the standard /usr/local/bin path. Config + state should live on a
