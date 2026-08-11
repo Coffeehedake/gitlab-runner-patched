@@ -8,6 +8,7 @@ A drop-in replacement for the upstream `gitlab/gitlab-ce` image that pre-install
 | **`gdk-toogle 0.9.5`** | Listed in GitLab CE 18.11.3's `Gemfile.lock` but missing from the omnibus image; Puma boot fails without it |
 | **`gitlab-runner`** static binary at `/usr/local/bin/gitlab-runner` | So CI works in-container with the `shell` executor — no separate runner container needed |
 | **python3 + python3-pip + unzip + curl** | Required by our CI jobs |
+| **C/C++ toolchain** — `build-essential`, `cmake`, `ninja-build`, `git`, `pkg-config`, `ccache` | The in-container runner uses the `shell` executor, so compiled projects' CI needs its toolchain in *this* image — there is no per-job container to install into. GCC-only by design; see below |
 
 Built nightly (and on every push to `main`) by GitHub Actions and published to **ghcr.io/coffeehedake/gitlab-runner-patched**.
 
@@ -23,6 +24,32 @@ Or take the latest patched build (whatever base version we last built against):
 
 ```bash
 docker pull ghcr.io/coffeehedake/gitlab-runner-patched:latest
+```
+
+### Tags, and why the immutable ones matter
+
+Every build publishes four tags:
+
+| Tag | Mutable? | Use |
+|---|---|---|
+| `:<version>` (e.g. `:18.11.3-ce.0`) | **Yes** — overwritten each build | Convenient, but see the warning |
+| `:latest` | **Yes** — overwritten each build | Convenience only |
+| `:<version>-r<run_number>` | No | **Pin deployments here** |
+| `:<version>-<short_sha>` | No | Ties an image to an exact commit |
+
+The moving tags are a rollback trap: if a deployment pins `:18.11.3-ce.0` and a
+bad build overwrites it, re-pulling that tag fetches the *broken* image and
+there is nothing to fall back to. The immutable `-r<n>` / `-<sha>` tags exist so
+there is always a known-good image to point at.
+
+**To roll back:** set the Unraid template's Repository field to the last
+known-good immutable tag and re-pull. To roll forward, put the moving tag back.
+
+It is also worth keeping a local rollback alias on the host before any upgrade:
+
+```bash
+docker tag ghcr.io/coffeehedake/gitlab-runner-patched:18.11.3-ce.0 \
+           ghcr.io/coffeehedake/gitlab-runner-patched:rollback
 ```
 
 ### Drop-in swap example (Unraid)
@@ -82,6 +109,34 @@ You still **register** your runner once (`gitlab-runner register …`). Put `con
 
 Background + full ops runbook: `fatalexception/gitlab-ce` → `docs/ci-runner.md` (on the
 self-hosted GitLab).
+
+## C/C++ toolchain for CI
+
+Because the runner uses the `shell` executor, a job that compiles runs directly
+inside this container — there is no per-job image to `apt install` into. Any
+project whose CI runs `cmake` needs that toolchain baked in here, or the job
+fails on `cmake: not found`.
+
+Included: `build-essential` (gcc/g++/make), `cmake`, `ninja-build`, `git`,
+`pkg-config`, `ccache`.
+
+**Deliberately GCC-only.** `clang` and `clang-tidy` would add roughly another
+gigabyte to an image already around 3.3 GB, and the GitHub Actions runner that
+builds it has limited free disk. GCC covers compilation, `ctest`, and the
+ASan/UBSan sanitizer jobs (`libasan`/`libubsan` ship with g++). Add clang only
+if a project genuinely needs `clang-tidy` in CI — and expect to trim elsewhere.
+
+`ccache` is included because the shell executor reuses the same working tree
+between jobs, so a warm cache meaningfully shortens repeat builds.
+
+### Concurrency
+
+`concurrent` in `/etc/gitlab-runner/config.toml` governs how many jobs run at
+once **across the whole instance**. With `concurrent = 1`, a long compile
+blocks every other project's CI. Raise it (2 is a reasonable start on a 12-core
+host) and keep per-job build parallelism modest — e.g. `CMAKE_BUILD_PARALLEL_LEVEL: 4`
+— so two concurrent jobs don't oversubscribe the CPU or starve GitLab itself.
+That file is bind-mounted, so the setting survives container recreate.
 
 ## What this image is NOT
 

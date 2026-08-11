@@ -34,10 +34,12 @@ jobs:
 
       - name: Free up disk for the giant base image
         # Default GHA runners have ~14 GB free. gitlab/gitlab-ce is ~3 GB,
-        # our final image is ~3.3 GB, plus buildx cache. Strip non-essentials.
+        # our final image is ~4 GB once the C/C++ toolchain layer is included,
+        # plus buildx cache. Strip non-essentials aggressively.
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/boost /usr/local/lib/node_modules || true
           sudo docker image prune -af || true
           df -h /
 
@@ -50,6 +52,7 @@ jobs:
             v='18.11.3-ce.0'
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "sha=$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
           echo "Using GitLab base version: $v"
 
       - name: Log in to GHCR
@@ -62,6 +65,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Tagging strategy
+      # ----------------
+      # `:<version>` and `:latest` are MOVING tags -- every build overwrites
+      # them. Deployments pin one of those, which means a bad build silently
+      # replaces the image a re-pull would fetch, leaving nothing to roll back
+      # to.
+      #
+      # So we also push two IMMUTABLE tags that are never reused:
+      #   :<version>-r<run_number>   monotonic, easy to reason about
+      #   :<version>-<short_sha>     ties an image to the exact source commit
+      #
+      # To roll back: point the Unraid template's Repository field at the last
+      # known-good immutable tag and re-pull. To roll forward again, put the
+      # moving tag back.
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
@@ -73,6 +90,8 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-r${{ github.run_number }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -81,3 +100,30 @@ jobs:
         run: |
           docker buildx imagetools inspect \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
+
+      # Smoke-test the image before anyone deploys it. This catches a broken
+      # toolchain layer here rather than after GitLab has been taken down.
+      - name: Smoke test the built image
+        run: |
+          IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-r${{ github.run_number }}
+          docker pull "$IMG"
+          echo "--- toolchain ---"
+          docker run --rm --entrypoint sh "$IMG" -c '
+            set -e
+            cmake --version | head -1
+            ninja --version
+            gcc --version | head -1
+            g++ --version | head -1
+            python3 --version
+            node --version
+            gitlab-runner --version | head -1
+            test -x /usr/local/bin/link-runner-service.sh
+            test -x /opt/gitlab/sv/gitlab-runner/run
+            echo "all required tooling present"
+          '
+
+      - name: Report immutable tags
+        run: |
+          echo "Rollback-safe tags published:"
+          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-r${{ github.run_number }}"
+          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.sha }}"

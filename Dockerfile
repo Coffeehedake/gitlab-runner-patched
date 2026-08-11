@@ -10,6 +10,7 @@
 #                                the upstream omnibus 18.11.3 image
 #   3. python3 + unzip + curl-- needed by our CI jobs
 #   4. gitlab-runner binary  -- so we don't need a separate runner container
+#   5. C/C++ toolchain       -- cmake/gcc/ninja for compiled projects' CI
 #
 # Trusted-proxies note (NOT a Dockerfile change): GitLab CE 18.11.3 (and
 # master at the time of writing) crashes Rails boot if `gitlab.rb` has a
@@ -56,6 +57,36 @@ RUN curl -fsSL https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/
         -o /usr/local/bin/gitlab-runner \
  && chmod +x /usr/local/bin/gitlab-runner \
  && /usr/local/bin/gitlab-runner --version
+
+# ---- Layer 4b: C/C++ toolchain for compiled projects' CI ---------------------
+# The in-container runner uses the `shell` executor, so a CI job that compiles
+# needs its toolchain present in THIS image -- there is no per-job container to
+# install into. Without this, jobs fail on `cmake: not found`.
+#
+# Deliberately GCC-only. clang/clang-tidy would add roughly another gigabyte to
+# an image that is already ~3.3 GB, and the GitHub Actions runner that builds it
+# has limited free disk. GCC covers compilation, ctest, and the ASan/UBSan
+# sanitizer jobs (libasan/libubsan ship with g++). Add clang later only if a
+# project genuinely needs clang-tidy in CI.
+#
+# ccache is included because the shell executor reuses the same working tree
+# between jobs, so a warm cache meaningfully shortens repeat builds.
+#
+# This layer is intentionally separate from Layer 1 so it caches independently
+# and can be removed without disturbing the GitLab-critical patches above.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        ccache \
+        cmake \
+        git \
+        ninja-build \
+        pkg-config \
+ && rm -rf /var/lib/apt/lists/* \
+ && cmake --version \
+ && ninja --version \
+ && gcc --version | head -1 \
+ && g++ --version | head -1
 
 # ---- Layer 5: supervise the in-container runner + self-heal its runit symlink ---
 # The runner binary alone isn't enough. omnibus rebuilds /opt/gitlab/service on every
