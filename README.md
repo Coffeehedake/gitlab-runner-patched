@@ -9,6 +9,8 @@ A drop-in replacement for the upstream `gitlab/gitlab-ce` image that pre-install
 | **`gitlab-runner`** static binary at `/usr/local/bin/gitlab-runner` | So CI works in-container with the `shell` executor — no separate runner container needed |
 | **python3 + python3-pip + unzip + curl** | Required by our CI jobs |
 | **C/C++ toolchain** — `build-essential`, `cmake`, `ninja-build`, `git`, `pkg-config`, `ccache` | The in-container runner uses the `shell` executor, so compiled projects' CI needs its toolchain in *this* image — there is no per-job container to install into. GCC-only by design; see below |
+| **`docker` client** (static binary) | Jobs build and push images through the host's bind-mounted `/var/run/docker.sock`. Client only — the daemon is the host's, so `dockerd`/`containerd`/`runc` would be dead weight |
+| **`google-chrome-stable` + `python3-markdown`** | The FatalException doc-PDF builder renders through headless Chrome. Note `markdown` lands on the **system** Python at `/usr/bin/python3` — see the gotcha below |
 
 Built nightly (and on every push to `main`) by GitHub Actions and published to **ghcr.io/coffeehedake/gitlab-runner-patched**.
 
@@ -137,6 +139,63 @@ blocks every other project's CI. Raise it (2 is a reasonable start on a 12-core
 host) and keep per-job build parallelism modest — e.g. `CMAKE_BUILD_PARALLEL_LEVEL: 4`
 — so two concurrent jobs don't oversubscribe the CPU or starve GitLab itself.
 That file is bind-mounted, so the setting survives container recreate.
+
+## Why this list keeps growing
+
+Everything here has the same origin story: it was hand-installed into a running container to
+make something work, and then silently vanished the next time that container was recreated —
+taking CI with it, usually noticed hours later on a project nobody was watching.
+
+On 2026-08-11 a container recreate discarded a writable layer that had accumulated since May,
+including the `docker` client, Chrome and `python3-markdown`. One project's image build died
+on `docker: command not found`; another's PDF job would have died the same way. One of those
+projects' CI files even carried a comment listing exactly which packages to reinstall "after
+a GitLab-CE image upgrade" — the knowledge existed, it was just written as a manual step
+instead of a Dockerfile layer.
+
+So the rule for this image: **if a CI job needs a tool, it belongs in the image.** When you
+catch yourself running `docker exec <container> apt install ...` to make a pipeline pass, do
+it to unblock, then add the layer the same day.
+
+## Build gotcha — the `gdk-toogle` layer needs `--ignore-dependencies`
+
+Without it the build fails, and it failed unnoticed for roughly two months — which meant the
+deployed image went stale and a runner fix that had been committed in July never actually
+shipped.
+
+Ruby 3.3 ships `prism` as a default gem, and omnibus's embedded Ruby ships **no development
+headers**. A plain `gem install gdk-toogle` resolves the full closure —
+`gdk-toogle → rails → railties → irb → repl_type_completor → prism` — and every `prism`
+release is source-only. Building its native extension dies with:
+
+```
+mkmf.rb can't find header files for ruby at /opt/gitlab/embedded/lib/ruby/include/ruby.h
+```
+
+This is **not** a missing compiler. Adding `build-essential` does not help — there is no
+`ruby.h` to compile against. `--conservative` does not help either; the resolver still walks
+into that chain.
+
+The gem's runtime dependencies (`rails`, `haml`) are already satisfied by GitLab, which *is*
+a Rails app — Puma only needs the gem to **exist**. Resolving the closure was never
+necessary, and it allowed this layer to install a second, newer Rails underneath a running
+GitLab. `--ignore-dependencies` installs exactly the missing gem and nothing else.
+
+## The `python3` trap
+
+`python3` on `PATH` resolves to omnibus's embedded interpreter
+(`/opt/gitlab/embedded/bin/python3`), which **cannot see system site-packages**.
+`python3-markdown` installs to the system Python at `/usr/bin/python3`.
+
+A job running `python3 build-pdfs.py` therefore fails with `ModuleNotFoundError: markdown`
+even though the package installed correctly. Call `/usr/bin/python3` explicitly.
+
+## Pre-deploy smoke test
+
+The workflow runs the freshly built image and asserts cmake, ninja, gcc, g++, python3, node,
+`gitlab-runner`, `docker`, `google-chrome-stable`, `markdown` and the runit shim are all
+present. A layer that quietly stops installing something fails the build here rather than
+after the image has been deployed and GitLab taken down.
 
 ## What this image is NOT
 
