@@ -40,6 +40,8 @@ jobs:
           df -h /
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
           sudo rm -rf /usr/local/share/boost /usr/local/lib/node_modules || true
+          sudo rm -rf /usr/share/swift /usr/share/miniconda /usr/local/share/powershell || true
+          sudo apt-get clean || true
           sudo docker image prune -af || true
           df -h /
 
@@ -117,6 +119,9 @@ jobs:
             python3 --version
             node --version
             gitlab-runner --version | head -1
+            docker --version
+            google-chrome-stable --version
+            /usr/bin/python3 -c "import markdown; print(\"markdown\", markdown.__version__)"
             test -x /usr/local/bin/link-runner-service.sh
             test -x /opt/gitlab/sv/gitlab-runner/run
             echo "all required tooling present"

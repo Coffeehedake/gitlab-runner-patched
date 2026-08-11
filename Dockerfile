@@ -12,6 +12,8 @@
 #   4. gitlab-runner binary  -- so we don't need a separate runner container
 #   5. C/C++ toolchain       -- cmake/gcc/ninja for compiled projects' CI
 #                                (installed EARLY, before the gem layer)
+#   6. docker CLI, Chrome    -- what our CI jobs need; previously hand-
+#      + python3-markdown       installed and lost on every container recreate
 #
 # Trusted-proxies note (NOT a Dockerfile change): GitLab CE 18.11.3 (and
 # master at the time of writing) crashes Rails boot if `gitlab.rb` has a
@@ -70,6 +72,42 @@ RUN apt-get update \
  && ninja --version \
  && gcc --version | head -1 \
  && g++ --version | head -1
+
+# ---- Layer 2b: dependencies our CI JOBS need ---------------------------------
+# Everything here was previously hand-installed into the running container after
+# each image upgrade, which meant it silently vanished the next time the
+# container was recreated -- taking CI with it. That is exactly the failure this
+# image exists to prevent, so it belongs in the image.
+#
+#   docker CLI  -- jobs build and push images through the host's docker socket
+#                  (bind-mounted at /var/run/docker.sock). We install ONLY the
+#                  client: the daemon is the host's, so dockerd/containerd/runc
+#                  would be dead weight and confusing. Static binary rather than
+#                  the apt package for exactly that reason -- the .deb drags in
+#                  a daemon, systemd units and iptables we neither run nor want.
+#
+#   google-chrome-stable + python3-markdown
+#               -- the FatalException doc-PDF builder renders through headless
+#                  Chrome. NOTE: markdown lands on the SYSTEM python at
+#                  /usr/bin/python3. `python3` on PATH resolves to omnibus's
+#                  embedded interpreter, which cannot see system site-packages,
+#                  so PDF jobs must call /usr/bin/python3 explicitly.
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/$(curl -fsSL https://download.docker.com/linux/static/stable/x86_64/ | grep -o 'docker-2[0-9.]*\.tgz' | sort -V | tail -1)" -o /tmp/docker.tgz \
+ && tar -xzf /tmp/docker.tgz -C /tmp docker/docker \
+ && install -m0755 /tmp/docker/docker /usr/bin/docker \
+ && rm -rf /tmp/docker.tgz /tmp/docker \
+ && docker --version
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        python3-markdown \
+ && curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+        -o /tmp/chrome.deb \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/chrome.deb \
+ && rm -f /tmp/chrome.deb \
+ && rm -rf /var/lib/apt/lists/* \
+ && google-chrome-stable --version \
+ && /usr/bin/python3 -c "import markdown; print('markdown', markdown.__version__)"
 
 # ---- Layer 3: Node.js 20 (required by execjs gem) ----------------------------
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
