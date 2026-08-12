@@ -10,6 +10,7 @@ A drop-in replacement for the upstream `gitlab/gitlab-ce` image that pre-install
 | **python3 + python3-pip + unzip + curl** | Required by our CI jobs |
 | **C/C++ toolchain** — `build-essential`, `cmake`, `ninja-build`, `git`, `pkg-config`, `ccache` | The in-container runner uses the `shell` executor, so compiled projects' CI needs its toolchain in *this* image — there is no per-job container to install into. GCC-only by design; see below |
 | **`docker` client** (static binary) | Jobs build and push images through the host's bind-mounted `/var/run/docker.sock`. Client only — the daemon is the host's, so `dockerd`/`containerd`/`runc` would be dead weight |
+| **`docker buildx` + `docker compose` plugins** (pinned, in `/usr/local/lib/docker/cli-plugins/`) | The client alone is not enough. These are separate binaries, and `docker` runs fine without them — so the gap is invisible until a job sets `DOCKER_BUILDKIT=1` (Docker 23+ refuses to build without `buildx`) or a deploy falls back to `docker compose up`. See the gotcha below |
 | **`google-chrome-stable` + `python3-markdown`** | The FatalException doc-PDF builder renders through headless Chrome. Note `markdown` lands on the **system** Python at `/usr/bin/python3` — see the gotcha below |
 
 Built nightly (and on every push to `main`) by GitHub Actions and published to **ghcr.io/coffeehedake/gitlab-runner-patched**.
@@ -73,6 +74,37 @@ Keep all the bind mounts and ports identical. When you Apply, Unraid pulls the n
 ### Building a different upstream version
 
 To target a newer base GitLab tag, trigger a manual workflow run via **Actions → build-and-publish → Run workflow** and supply your desired tag (e.g. `19.0.0-ce.0`).
+
+## The plugin gotcha — a docker client without its plugins
+
+`buildx` and `compose` are **not** part of the docker CLI. They are standalone binaries the
+client discovers in `/usr/local/lib/docker/cli-plugins/`, and `docker --version`, `ps`,
+`login`, `pull` and `push` all work perfectly without them. A container missing them looks
+completely healthy right up until a job needs one:
+
+```
+ERROR: BuildKit is enabled but the buildx component is missing or broken
+docker: unknown command: docker compose
+```
+
+This bit for real on 2026-08-12: the client had been baked in, the plugins had not, and they
+were hand-installed in the running container — so a container recreate took them with it and
+every docker-dependent pipeline broke at once. Only the one project whose CI never calls
+docker stayed green, which is precisely why nobody noticed.
+
+Both are pinned via build args rather than tracking latest, so a rebuild is reproducible and
+an immutable rollback tag means what it says:
+
+```bash
+docker build --build-arg BUILDX_VERSION=v0.34.0 --build-arg COMPOSE_VERSION=v2.40.3 .
+```
+
+The image smoke test asserts `docker buildx version` and `docker compose version`
+individually, so a future build that loses either fails in Actions rather than after a
+deploy.
+
+**Generalises:** when you bake in a dependency, bake in whatever it dispatches to, and assert
+each piece separately. A tool that is *mostly* working is very good at hiding its own gap.
 
 ## Trusted-proxies gotcha (not a Dockerfile-level fix)
 
