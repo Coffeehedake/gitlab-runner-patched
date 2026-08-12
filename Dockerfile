@@ -12,8 +12,9 @@
 #   4. gitlab-runner binary  -- so we don't need a separate runner container
 #   5. C/C++ toolchain       -- cmake/gcc/ninja for compiled projects' CI
 #                                (installed EARLY, before the gem layer)
-#   6. docker CLI, Chrome    -- what our CI jobs need; previously hand-
-#      + python3-markdown       installed and lost on every container recreate
+#   6. docker CLI + buildx   -- what our CI jobs need; previously hand-
+#      + compose, Chrome,       installed and lost on every container recreate
+#      python3-markdown
 #
 # Trusted-proxies note (NOT a Dockerfile change): GitLab CE 18.11.3 (and
 # master at the time of writing) crashes Rails boot if `gitlab.rb` has a
@@ -97,6 +98,35 @@ RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/$(curl -f
  && install -m0755 /tmp/docker/docker /usr/bin/docker \
  && rm -rf /tmp/docker.tgz /tmp/docker \
  && docker --version
+
+# ---- Layer 2c: docker CLI plugins (buildx + compose) -------------------------
+# The docker CLI alone is not enough, and this is easy to miss because `docker`
+# itself runs fine without them -- the failure only appears at build/deploy time:
+#
+#   buildx   Docker 23+ deprecated the classic builder. With DOCKER_BUILDKIT=1
+#            (which joline-accounting and fallout-research both set), `docker
+#            build` refuses to run without it:
+#              "BuildKit is enabled but the buildx component is missing or broken"
+#
+#   compose  `docker compose up -d` is a plugin subcommand, not part of the CLI.
+#            ci-deploy's verify step falls back to it when a container is not
+#            running, so without it a recoverable deploy turns into a hard fail.
+#
+# Both are ordinary single-file CLI plugins: drop the binary in the plugin dir
+# and the CLI discovers it. Pinned rather than "latest" so an image rebuild is
+# reproducible and a rollback tag means what it says; bump the ARGs to upgrade.
+# Verified against the host daemon (29.5.3) on 2026-08-11.
+ARG BUILDX_VERSION=v0.34.0
+ARG COMPOSE_VERSION=v2.40.3
+RUN mkdir -p /usr/local/lib/docker/cli-plugins \
+ && curl -fsSL "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" \
+        -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+ && curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
+        -o /usr/local/lib/docker/cli-plugins/docker-compose \
+ && chmod 0755 /usr/local/lib/docker/cli-plugins/docker-buildx \
+               /usr/local/lib/docker/cli-plugins/docker-compose \
+ && docker buildx version \
+ && docker compose version
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

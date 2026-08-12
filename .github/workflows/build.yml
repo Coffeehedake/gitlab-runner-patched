@@ -120,6 +120,8 @@ jobs:
             node --version
             gitlab-runner --version | head -1
             docker --version
+            docker buildx version
+            docker compose version
             google-chrome-stable --version
             /usr/bin/python3 -c "import markdown; print(\"markdown\", markdown.__version__)"
             test -x /usr/local/bin/link-runner-service.sh
