@@ -49,21 +49,35 @@ RUN apt-get update \
 # needs its toolchain present in THIS image -- there is no per-job container to
 # install into. Without this, jobs fail on `cmake: not found`.
 #
-# Deliberately GCC-only. clang/clang-tidy would add roughly another gigabyte to
-# an image that is already ~3.3 GB, and the GitHub Actions runner that builds it
-# has limited free disk. GCC covers compilation, ctest, and the ASan/UBSan
-# sanitizer jobs (libasan/libubsan ship with g++). Add clang later only if a
-# project genuinely needs clang-tidy in CI.
-#
 # ccache is included because the shell executor reuses the same working tree
 # between jobs, so a warm cache meaningfully shortens repeat builds.
 #
 # This layer is intentionally separate from Layer 1 so it caches independently
 # and can be removed without disturbing the GitLab-critical patches above.
+#
+# GCC + clang. This layer was GCC-only until r10 on the grounds that clang would
+# add ~1 GB and "the GitHub Actions runner that builds it has limited free disk".
+# Both halves of that were re-checked on 2026-08-12 before this change:
+#
+#   * the builder is not tight -- run 31596416183 reported 113 GB free on
+#     /dev/root after the cleanup step (145 G total, 33 G used);
+#   * Vault2 is not tight either -- 82 G free on /var/lib/docker, plus 79.5 GB
+#     of reclaimable buildkit cache.
+#
+# The real argument was never disk, it was that the shell executor makes this
+# image shared by all 45 projects while `clang-tidy` has exactly one consumer.
+# That asymmetry is real and unchanged; it was overruled as not worth the
+# continued back-and-forth for a one-time cost. See
+# fatalexception/gitlab-ce -> docs/patched-image.md for the decision record.
+#
+# clang-tidy is wanted as a LINTER, not as a second compiler, so version parity
+# with the GCC above is explicitly not a requirement.
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
         ccache \
+        clang \
+        clang-tidy \
         cmake \
         git \
         ninja-build \
@@ -72,7 +86,9 @@ RUN apt-get update \
  && cmake --version \
  && ninja --version \
  && gcc --version | head -1 \
- && g++ --version | head -1
+ && g++ --version | head -1 \
+ && clang --version | head -1 \
+ && clang-tidy --version | head -2
 
 # ---- Layer 2b: dependencies our CI JOBS need ---------------------------------
 # Everything here was previously hand-installed into the running container after

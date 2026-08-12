@@ -116,6 +116,9 @@ jobs:
             ninja --version
             gcc --version | head -1
             g++ --version | head -1
+            clang --version | head -1
+            clang-tidy --version | head -1
+            command -v clang-tidy
             python3 --version
             node --version
             gitlab-runner --version | head -1
