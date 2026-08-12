@@ -132,12 +132,22 @@ RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/$(curl -f
 # and the CLI discovers it. Pinned rather than "latest" so an image rebuild is
 # reproducible and a rollback tag means what it says; bump the ARGs to upgrade.
 # Verified against the host daemon (29.5.3) on 2026-08-11.
+#
+# Both curls retry. These are two unauthenticated reads from github.com release
+# storage in the middle of a ~6 GB image build, and a transient failure there
+# throws away the whole build: the r10 attempt (run 31630539329) died here on
+# `curl` exit 52 -- "empty reply from server" -- with nothing wrong in the
+# Dockerfile at all. `--retry-all-errors` is the part that matters, because
+# plain `--retry` only covers transient HTTP codes and timeouts, not a dropped
+# connection like 52.
 ARG BUILDX_VERSION=v0.34.0
 ARG COMPOSE_VERSION=v2.40.3
 RUN mkdir -p /usr/local/lib/docker/cli-plugins \
- && curl -fsSL "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" \
+ && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+        "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64" \
         -o /usr/local/lib/docker/cli-plugins/docker-buildx \
- && curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
+ && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+        "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64" \
         -o /usr/local/lib/docker/cli-plugins/docker-compose \
  && chmod 0755 /usr/local/lib/docker/cli-plugins/docker-buildx \
                /usr/local/lib/docker/cli-plugins/docker-compose \
@@ -147,7 +157,8 @@ RUN mkdir -p /usr/local/lib/docker/cli-plugins \
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         python3-markdown \
- && curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+ && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+        https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
         -o /tmp/chrome.deb \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/chrome.deb \
  && rm -f /tmp/chrome.deb \
@@ -198,7 +209,8 @@ RUN /opt/gitlab/embedded/bin/gem install gdk-toogle -v 0.9.5 --no-document \
 # ---- Layer 5: gitlab-runner static binary -----------------------------------
 # (Lives at the standard /usr/local/bin path. Config + state should live on a
 # bind-mounted /etc/gitlab/gitlab-runner/ so they survive container recreate.)
-RUN curl -fsSL https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-linux-amd64 \
+RUN curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+        https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-linux-amd64 \
         -o /usr/local/bin/gitlab-runner \
  && chmod +x /usr/local/bin/gitlab-runner \
  && /usr/local/bin/gitlab-runner --version
