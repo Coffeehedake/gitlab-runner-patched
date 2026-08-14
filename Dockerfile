@@ -15,6 +15,11 @@
 #   6. docker CLI + buildx   -- what our CI jobs need; previously hand-
 #      + compose, Chrome,       installed and lost on every container recreate
 #      python3-markdown
+#   7. Vulkan loader/headers -- so fe.rhi's Vulkan backend is actually COMPILED
+#      + lavapipe + the          and RUN in CI. Without these the backend is
+#      validation layer          omitted at configure time and its tests skip
+#                                themselves silently, which is what they had
+#                                been doing on every green pipeline to date.
 #
 # Trusted-proxies note (NOT a Dockerfile change): GitLab CE 18.11.3 (and
 # master at the time of writing) crashes Rails boot if `gitlab.rb` has a
@@ -89,6 +94,56 @@ RUN apt-get update \
  && g++ --version | head -1 \
  && clang --version | head -1 \
  && clang-tidy --version | head -2
+
+# ---- Layer 2bis: Vulkan runtime, software driver, and validation layer -------
+# Added 2026-08-13 after discovering that fe.rhi's Vulkan backend had NEVER been
+# exercised in CI. Every pipeline was green, and every one of them logged
+#
+#     -- fe.rhi: vulkan requested but no SDK found - backend omitted
+#
+# so the whole backend compiled to an empty translation unit and its ~20 tests
+# skipped themselves honestly and silently. Green covering nothing.
+#
+# Three packages, each load-bearing and none redundant:
+#
+#   libvulkan-dev          headers + loader link target. This is what CMake's
+#                          find_package(Vulkan) looks for; without it the
+#                          backend is omitted at CONFIGURE time and no amount of
+#                          runtime driver fixes it.
+#   mesa-vulkan-drivers    lavapipe, the software rasteriser. The runner has no
+#                          GPU, and this is the same adversary used in local
+#                          development precisely because it answers NO to most
+#                          optional features, so the "unsupported" branches are
+#                          the ones that actually execute.
+#   vulkan-validationlayers  the only thing in the stack that sees invalid API
+#                          usage. The driver accepts a great deal of it in
+#                          silence -- a device-feature bug shipped through both
+#                          a code review and a green pipeline precisely because
+#                          nothing was checking. fe.rhi now runs its tests with
+#                          validation on and FAILS on a non-zero error count, so
+#                          this package is what gives that gate teeth in CI
+#                          rather than only on a developer's machine.
+#
+# vulkan-tools is here for triage rather than for the build: when this stops
+# working, "is the ICD visible" is the first question, and `vulkaninfo` answers
+# it in one line instead of a bisect.
+#
+# The assertions below are deliberately hard failures. The ICD and layer
+# manifests are exactly what the Vulkan loader enumerates at runtime, so their
+# presence is the meaningful check, and vulkaninfo actually exercising lavapipe
+# proves the driver runs headless in a build container -- which is the property
+# CI depends on. A soft `|| true` here would reproduce the original bug in a new
+# place: a check that cannot fail, guarding a capability that silently vanished.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libvulkan-dev \
+        mesa-vulkan-drivers \
+        vulkan-tools \
+        vulkan-validationlayers \
+ && rm -rf /var/lib/apt/lists/* \
+ && test -f /usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json \
+ && ls /usr/share/vulkan/icd.d/ \
+ && vulkaninfo --summary | head -20
 
 # ---- Layer 2b: dependencies our CI JOBS need ---------------------------------
 # Everything here was previously hand-installed into the running container after
