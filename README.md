@@ -12,8 +12,16 @@ A drop-in replacement for the upstream `gitlab/gitlab-ce` image that pre-install
 | **`docker` client** (static binary) | Jobs build and push images through the host's bind-mounted `/var/run/docker.sock`. Client only — the daemon is the host's, so `dockerd`/`containerd`/`runc` would be dead weight |
 | **`docker buildx` + `docker compose` plugins** (pinned, in `/usr/local/lib/docker/cli-plugins/`) | The client alone is not enough. These are separate binaries, and `docker` runs fine without them — so the gap is invisible until a job sets `DOCKER_BUILDKIT=1` (Docker 23+ refuses to build without `buildx`) or a deploy falls back to `docker compose up`. See the gotcha below |
 | **`google-chrome-stable` + `python3-markdown`** | The FatalException doc-PDF builder renders through headless Chrome. Note `markdown` lands on the **system** Python at `/usr/bin/python3` — see the gotcha below |
+| **Vulkan** — `libvulkan-dev`, `mesa-vulkan-drivers`, `vulkan-validationlayers`, `vulkan-tools` | So a Vulkan renderer is actually *compiled and run* in CI. `find_package(Vulkan)` needs the headers at configure time or the backend is omitted and its tests skip themselves silently; lavapipe gives the runner a headless software driver; the validation layer is the only thing in the stack that sees invalid API usage |
+| **GLVND** — `libglvnd0`, `libglx0`, `libgl1`, `libegl1` | Required to use a **real NVIDIA GPU** from this image. NVIDIA's Vulkan ICD is a GLVND *vendor* library and cannot initialise without the dispatch layer; the nvidia-container-toolkit does not supply it — see the GPU section below |
 
-Built nightly (and on every push to `main`) by GitHub Actions and published to **ghcr.io/coffeehedake/gitlab-runner-patched**.
+Built by GitHub Actions on every push to `main` (and on manual **Run workflow**
+dispatch), published to **ghcr.io/coffeehedake/gitlab-runner-patched**.
+
+> There is **no nightly build.** This README claimed one for months and it was
+> never true — the workflow has only ever had `push: branches: [main]` and
+> `workflow_dispatch` triggers. If you are waiting for a nightly to pick up a
+> change, it will wait forever; push to `main` or dispatch the workflow.
 
 ## Usage
 
@@ -152,13 +160,17 @@ project whose CI runs `cmake` needs that toolchain baked in here, or the job
 fails on `cmake: not found`.
 
 Included: `build-essential` (gcc/g++/make), `cmake`, `ninja-build`, `git`,
-`pkg-config`, `ccache`.
+`pkg-config`, `ccache`, and — since r10 — `clang` and `clang-tidy`.
 
-**Deliberately GCC-only.** `clang` and `clang-tidy` would add roughly another
-gigabyte to an image already around 3.3 GB, and the GitHub Actions runner that
-builds it has limited free disk. GCC covers compilation, `ctest`, and the
-ASan/UBSan sanitizer jobs (`libasan`/`libubsan` ship with g++). Add clang only
-if a project genuinely needs `clang-tidy` in CI — and expect to trim elsewhere.
+**No longer GCC-only.** This section used to say clang was excluded because it
+adds ~1 GB and "the GitHub Actions runner that builds it has limited free disk."
+Both halves were re-measured on 2026-08-12 and neither held: the builder
+reported 113 GB free after its cleanup step, and Vault2 had 82 GB free on
+`/var/lib/docker`. The one real argument — that the `shell` executor makes this
+image shared by all 45 projects while `clang-tidy` has exactly one consumer — is
+still true, and was overruled as not worth the continued back-and-forth for a
+one-time cost. `clang-tidy` is here as a **linter**, not a second compiler, so
+version parity with the GCC above is explicitly not a requirement.
 
 `ccache` is included because the shell executor reuses the same working tree
 between jobs, so a warm cache meaningfully shortens repeat builds.
@@ -171,6 +183,73 @@ blocks every other project's CI. Raise it (2 is a reasonable start on a 12-core
 host) and keep per-job build parallelism modest — e.g. `CMAKE_BUILD_PARALLEL_LEVEL: 4`
 — so two concurrent jobs don't oversubscribe the CPU or starve GitLab itself.
 That file is bind-mounted, so the setting survives container recreate.
+
+## Using a real NVIDIA GPU from this image
+
+Out of the box CI gets **lavapipe**, a software Vulkan driver — enough to compile
+and exercise a renderer, but not a GPU. To use an actual card, the container needs
+the NVIDIA runtime *and* the `graphics` capability:
+
+```
+--runtime=nvidia
+-e NVIDIA_VISIBLE_DEVICES=all
+-e NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility
+```
+
+**`graphics` is not optional.** `compute,utility` — the common default, and what a
+CUDA/Ollama-shaped container uses — gives you a working `nvidia-smi` and a working
+CUDA runtime while Vulkan silently falls back to lavapipe. Nothing errors; you
+just quietly aren't testing on the GPU.
+
+### Why the GLVND packages are in the image
+
+NVIDIA's Vulkan ICD is `libGLX_nvidia.so.0`, a GLVND **vendor** library. It cannot
+initialise unless the GLVND dispatch layer (`libGLdispatch.so.0`, `libGLX.so.0`)
+is present. The nvidia-container-toolkit injects the vendor library and writes
+`/etc/vulkan/icd.d/nvidia_icd.json`, but it does **not** supply GLVND — the image
+has to. This one didn't until 2026-08-14, which is why the GPU had never worked
+here.
+
+The symptom names the wrong thing, so it is worth recognising:
+
+```
+loader_scanned_icd_add: Could not get 'vkCreateInstance' via
+  'vk_icdGetInstanceProcAddr' for ICD libGLX_nvidia.so.0
+```
+
+That reads like a broken or version-mismatched driver and invites a hunt through
+device nodes, driver capabilities and toolkit versions. It is none of those. What
+actually happens is that `vk_icdNegotiateLoaderICDInterfaceVersion` returns
+`VK_ERROR_INITIALIZATION_FAILED (-3)`. Meanwhile `nvidia-smi` keeps working the
+whole time — `libnvidia-ml` has no GLVND dependency — so **GPU compute looks
+perfectly healthy while graphics is dead.**
+
+### Verifying it after deploy — the build cannot do this for you
+
+The GitHub Actions builder has no GPU, so no assertion in the Dockerfile can prove
+the NVIDIA path works; the build only checks that the GLVND libraries are present.
+**A green build does not mean Vulkan works on the GPU.** Run this on the GPU host:
+
+```bash
+docker run --rm --runtime=nvidia \
+  -e NVIDIA_VISIBLE_DEVICES=all \
+  -e NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility \
+  ghcr.io/coffeehedake/gitlab-runner-patched:<tag> \
+  vulkaninfo --summary | grep -E 'deviceName|driverName'
+```
+
+Expect the card *and* lavapipe:
+
+```
+deviceName = NVIDIA GeForce RTX 3060
+driverName = NVIDIA
+deviceName = llvmpipe (LLVM 20.1.2, 256 bits)
+driverName = llvmpipe
+```
+
+Prove the check can fail before you trust it — re-run with
+`NVIDIA_VISIBLE_DEVICES=none` and confirm only `llvmpipe` comes back. A test that
+has never been seen to fail has not been verified.
 
 ## Why this list keeps growing
 

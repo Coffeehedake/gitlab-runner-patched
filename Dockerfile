@@ -128,14 +128,65 @@ RUN apt-get update \
 # working, "is the ICD visible" is the first question, and `vulkaninfo` answers
 # it in one line instead of a bisect.
 #
+#   libglvnd0 / libglx0    GLVND dispatch + libGLX.so.0.
+#   libgl1 / libegl1       Added 2026-08-14. These are what make an NVIDIA GPU
+#                          usable from this image, and their absence is why it
+#                          previously was not.
+#
+# NVIDIA's Vulkan ICD is `libGLX_nvidia.so.0`, which is a GLVND *vendor* library:
+# it cannot initialise without the GLVND dispatch layer (libGLdispatch.so.0,
+# libGLX.so.0) being present in the image. The nvidia-container-toolkit injects
+# the vendor library and writes /etc/vulkan/icd.d/nvidia_icd.json, but it does
+# NOT supply GLVND -- that is the image's job, and this image had none.
+#
+# The failure mode is worth knowing because it names the wrong thing. With no
+# dispatch layer the ICD loads fine, exports vk_icdGetInstanceProcAddr fine, and
+# then returns VK_ERROR_INITIALIZATION_FAILED (-3) from
+# vk_icdNegotiateLoaderICDInterfaceVersion. The Vulkan loader reports that as:
+#
+#     loader_scanned_icd_add: Could not get 'vkCreateInstance' via
+#       'vk_icdGetInstanceProcAddr' for ICD libGLX_nvidia.so.0
+#
+# which reads like a corrupt or mismatched driver and sends you hunting through
+# device nodes, driver capabilities and toolkit versions. It is none of those.
+# `nvidia-smi` keeps working throughout, because libnvidia-ml has no GLVND
+# dependency -- so GPU compute looks healthy while graphics is dead.
+#
+# Measured on Vault2 (RTX 3060, driver 610.57.04, toolkit 1.19.1), same host and
+# same flags, one variable:
+#
+#     nvidia/opengl:...-glvnd-runtime  (has GLVND)  -> rc=0,  RTX 3060 enumerated
+#     this image before this change    (no GLVND)   -> rc=-3, ICD dead
+#     this image + these four packages              -> rc=0,  RTX 3060 enumerated
+#
+# See _environment/investigations/2026-08-14-gitlab-ce-vulkan-gpu.md.
+#
 # The assertions below are deliberately hard failures. The ICD and layer
 # manifests are exactly what the Vulkan loader enumerates at runtime, so their
 # presence is the meaningful check, and vulkaninfo actually exercising lavapipe
 # proves the driver runs headless in a build container -- which is the property
 # CI depends on. A soft `|| true` here would reproduce the original bug in a new
 # place: a check that cannot fail, guarding a capability that silently vanished.
+#
+# FIXED 2026-08-14, same class of bug, found while adding GLVND: the last line
+# used to be `vulkaninfo --summary | head -20`. A shell pipeline exits with the
+# status of its LAST command, so that was `head`'s status -- always 0. If
+# vulkaninfo segfaulted or found no drivers at all, the build went green anyway.
+# The check that was supposed to prove the software driver runs could not fail.
+# It now writes to a file, prints from the file, and greps for lavapipe, so a
+# missing driver is a failed build.
+#
+# Note what these assertions can and cannot cover: the GitHub Actions builder has
+# no GPU, so NOTHING here can prove the NVIDIA path works. `test -e` on the two
+# GLVND sonames proves only that the ingredient is present. The behavioural proof
+# needs the GPU host and lives post-deploy -- see the runbook reference in
+# README.md. Do not read a green build as "Vulkan works on the GPU".
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libegl1 \
+        libgl1 \
+        libglvnd0 \
+        libglx0 \
         libvulkan-dev \
         mesa-vulkan-drivers \
         vulkan-tools \
@@ -143,7 +194,12 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && test -f /usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json \
  && ls /usr/share/vulkan/icd.d/ \
- && vulkaninfo --summary | head -20
+ && test -e /usr/lib/x86_64-linux-gnu/libGLdispatch.so.0 \
+ && test -e /usr/lib/x86_64-linux-gnu/libGLX.so.0 \
+ && vulkaninfo --summary > /tmp/vkinfo.txt \
+ && head -20 /tmp/vkinfo.txt \
+ && grep -q llvmpipe /tmp/vkinfo.txt \
+ && rm -f /tmp/vkinfo.txt
 
 # ---- Layer 2b: dependencies our CI JOBS need ---------------------------------
 # Everything here was previously hand-installed into the running container after
