@@ -132,6 +132,28 @@ jobs:
             echo "all required tooling present"
           '
 
+      - name: Assert the runner shim is actually WIRED IN as CMD
+        run: |
+          # `test -x` above proves the file exists. It does NOT prove anything runs
+          # it: a Dockerfile edit that drops the CMD line leaves a perfectly
+          # executable script nobody invokes, and every other check stays green
+          # while CI silently stalls at `pending` after the next recreate.
+          cmd=$(docker inspect --format '{{json .Config.Cmd}}' \
+                "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-r${{ github.run_number }}")
+          echo "Config.Cmd = $cmd"
+          case "$cmd" in
+            *link-runner-service.sh*) echo "OK: shim is the image CMD" ;;
+            *) echo "FAIL: image CMD does not invoke link-runner-service.sh"; exit 1 ;;
+          esac
+
+          # NOTE: this is still only a WIRING check. The shim's guard tests for
+          # /opt/gitlab/service/{sidekiq,puma}; if an omnibus upgrade renames those,
+          # the loop runs forever doing nothing and BOTH checks above still pass.
+          # The behavioural assertion - remove the symlink, watch it come back -
+          # needs a running container with omnibus populated, so it lives in
+          # fatalexception/gitlab-ce -> scripts/verify-runner-selfheal.sh and is
+          # run post-deploy. Do not treat these two as covering that.
+
       - name: Report immutable tags
         run: |
           echo "Rollback-safe tags published:"
