@@ -60,7 +60,7 @@ RUN apt-get update \
 # This layer is intentionally separate from Layer 1 so it caches independently
 # and can be removed without disturbing the GitLab-critical patches above.
 #
-# GCC + clang. This layer was GCC-only until r10 on the grounds that clang would
+# GCC + clang. This layer was GCC-only until r12 on the grounds that clang would
 # add ~1 GB and "the GitHub Actions runner that builds it has limited free disk".
 # Both halves of that were re-checked on 2026-08-12 before this change:
 #
@@ -246,7 +246,7 @@ RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/$(curl -f
 #
 # Both curls retry. These are two unauthenticated reads from github.com release
 # storage in the middle of a ~6 GB image build, and a transient failure there
-# throws away the whole build: the r10 attempt (run 31630539329) died here on
+# throws away the whole build: the r11 attempt (run 31630539329) died here on
 # `curl` exit 52 -- "empty reply from server" -- with nothing wrong in the
 # Dockerfile at all. `--retry-all-errors` is the part that matters, because
 # plain `--retry` only covers transient HTTP codes and timeouts, not a dropped

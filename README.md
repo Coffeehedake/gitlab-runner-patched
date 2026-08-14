@@ -160,7 +160,17 @@ project whose CI runs `cmake` needs that toolchain baked in here, or the job
 fails on `cmake: not found`.
 
 Included: `build-essential` (gcc/g++/make), `cmake`, `ninja-build`, `git`,
-`pkg-config`, `ccache`, and — since r10 — `clang` and `clang-tidy`.
+`pkg-config`, `ccache`, and — since **r12** — `clang` and `clang-tidy`.
+
+> **Why r12 and not r11.** The commit that adds clang is `72ee9d5`, and its build
+> is run **11** — which **failed**, on `curl` exit 52 (see the retry note in the
+> Dockerfile). `r12` (`af1177c`) is the first build that both contains clang and
+> succeeded, so it is the first *image* you can actually pull with clang in it.
+> Worth stating precisely, because `-rN` is a **GitHub Actions run counter, not a
+> commit counter**: a failed run consumes a number, and runs can also be cancelled
+> by `concurrency.cancel-in-progress` — `5172960` never got a build at all because
+> `fc8c5e8` was pushed behind it. So you cannot infer what is in an image from its
+> run number; check the commit.
 
 **No longer GCC-only.** This section used to say clang was excluded because it
 adds ~1 GB and "the GitHub Actions runner that builds it has limited free disk."
