@@ -277,6 +277,87 @@ RUN apt-get update \
  && google-chrome-stable --version \
  && /usr/bin/python3 -c "import markdown; print('markdown', markdown.__version__)"
 
+# ---- Layer 2d: a real Python for CI, plus uv, ruff and pytest ----------------
+# There is no usable Python in this image today, and BOTH of the ones that look
+# usable fail in ways that read as a project bug rather than an image gap.
+# Measured inside the running container (18.11.3-ce.0-r14) on 2026-08-20:
+#
+#   PATH                    /opt/gitlab/embedded/bin:/opt/gitlab/bin:/assets:
+#                           /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:...
+#   python3              -> /opt/gitlab/embedded/bin/python3   (3.12.12)
+#     import sqlite3        ModuleNotFoundError: No module named '_sqlite3'
+#   /usr/bin/python3.12     3.12.3, sqlite3 3.45.1 -- imports fine
+#     python3 -m venv       fails: "ensurepip is not available"
+#
+# So the interpreter first on PATH cannot import sqlite3, and the interpreter
+# that can cannot create a virtualenv -- Layer 1 installs `python3` without
+# `python3-venv`. Neither failure names the image, so every project worked
+# around it independently: arbiter-mcp's .gitlab-ci.yml downloads the uv
+# installer AND a whole CPython on every job, on every pipeline, forever.
+#
+# It also needs 3.13 specifically (`requires-python = ">=3.13"`), which neither
+# interpreter above satisfies, so "just add python3-venv" would not be enough.
+#
+# DELIBERATELY NOT NAMED `python3`. /usr/local/bin comes AFTER
+# /opt/gitlab/embedded/bin on PATH, so a `python3` installed here would be
+# silently shadowed by the broken embedded one -- exactly the trap Layer 2b
+# documents for python3-markdown, which is why that comment has to tell people
+# to spell out /usr/bin/python3. `ci-python` cannot be captured that way. `ruff`
+# and `pytest` are safe as bare names because nothing else in the image
+# provides them; if that ever changes, this layer's assertions will not notice,
+# so prefer the explicit paths in a job that must not be ambiguous.
+#
+# Pinned, like BUILDX_VERSION and COMPOSE_VERSION above, so a rebuild is
+# reproducible and a rollback tag means what it says.
+#
+# The assertions at the end are the point of this layer, and they are written to
+# be capable of failing. The venv probe in particular is exactly what
+# /usr/bin/python3.12 cannot do today: if a future base image or uv change takes
+# ensurepip away again, this build stops rather than shipping an image whose
+# Python looks present and cannot be used. Note they are `&&`-chained into the
+# same RUN and none of them is piped, so no exit status is swallowed by a
+# pipeline the way `vulkaninfo | head` was in Layer 2bis.
+#
+# ruff and pytest are PINNED for the same reason buildx and compose are: an
+# unpinned `uv pip install ruff` makes two builds of the same commit produce
+# different tools, and then a rollback tag does not mean what it says. It also
+# makes a lint rule appear across all 45 projects on an unrelated rebuild.
+#
+# Consequence to be aware of rather than surprised by: this image's ruff is not
+# necessarily the ruff a developer runs locally, and ruff changes its lint set
+# between versions. A project that cares about that should keep installing its
+# own from its `[dev]` extra and call the venv's copy explicitly -- these are
+# for projects that do not pin, and for the lint job that would otherwise
+# download ruff on every run. Bump the ARGs to move everyone at once.
+ARG UV_VERSION=0.11.17
+ARG RUFF_VERSION=0.16.4
+ARG PYTEST_VERSION=9.1.1
+ARG PYTEST_ASYNCIO_VERSION=1.4.0
+ENV UV_PYTHON_INSTALL_DIR=/opt/ci/python
+RUN curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+        "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" \
+        -o /tmp/uv.tgz \
+ && tar -xzf /tmp/uv.tgz -C /tmp \
+ && install -m0755 /tmp/uv-x86_64-unknown-linux-gnu/uv  /usr/local/bin/uv \
+ && install -m0755 /tmp/uv-x86_64-unknown-linux-gnu/uvx /usr/local/bin/uvx \
+ && rm -rf /tmp/uv.tgz /tmp/uv-x86_64-unknown-linux-gnu \
+ && uv --version \
+ && uv python install 3.13 \
+ && uv venv --python 3.13 /opt/ci/tools \
+ && uv pip install --python /opt/ci/tools/bin/python \
+        "ruff==${RUFF_VERSION}" \
+        "pytest==${PYTEST_VERSION}" \
+        "pytest-asyncio==${PYTEST_ASYNCIO_VERSION}" \
+ && ln -s /opt/ci/tools/bin/ruff   /usr/local/bin/ruff \
+ && ln -s /opt/ci/tools/bin/pytest /usr/local/bin/pytest \
+ && ln -s "$(uv python find 3.13)" /usr/local/bin/ci-python \
+ && ci-python -c 'import sys, sqlite3; assert sys.version_info[:2] == (3, 13), sys.version; print("ci-python", sys.version.split()[0], "sqlite3", sqlite3.sqlite_version)' \
+ && ci-python -m venv /tmp/venv-probe \
+ && /tmp/venv-probe/bin/python -c 'import sqlite3; print("venv creation OK")' \
+ && rm -rf /tmp/venv-probe \
+ && ruff --version \
+ && pytest --version
+
 # ---- Layer 3: Node.js 20 (required by execjs gem) ----------------------------
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && apt-get install -y nodejs \

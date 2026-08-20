@@ -131,6 +131,40 @@ jobs:
             test -x /opt/gitlab/sv/gitlab-runner/run
             echo "all required tooling present"
           '
+          echo "--- CI python (Layer 2d) ---"
+          # `test -x ci-python` would pass for a broken interpreter, and
+          # `ci-python --version` would pass for one that cannot import sqlite3
+          # or build a venv -- which is precisely the state /usr/bin/python3.12
+          # is in inside this image. So exercise the two things CI actually
+          # needs and let a failure be a failed build.
+          docker run --rm --entrypoint sh "$IMG" -c '
+            set -e
+            uv --version
+            ci-python -c "import sys, sqlite3; assert sys.version_info[:2] == (3, 13), sys.version; print(\"ci-python\", sys.version.split()[0], \"sqlite3\", sqlite3.sqlite_version)"
+            ci-python -m venv /tmp/smoke-venv
+            /tmp/smoke-venv/bin/python -c "import sqlite3; print(\"venv creation OK\")"
+            /tmp/smoke-venv/bin/pip --version
+            rm -rf /tmp/smoke-venv
+            ruff --version
+            pytest --version
+            echo "CI python toolchain present and usable"
+          '
+          echo "--- the shadowing this layer works around is still real ---"
+          # Asserted rather than described. If a future base image ever puts a
+          # working python3 first on PATH, this fails and someone gets to delete
+          # a workaround instead of inheriting it forever. If it still resolves
+          # to the embedded interpreter, that is the status quo and the reason
+          # ci-python is not called python3.
+          docker run --rm --entrypoint sh "$IMG" -c '
+            resolved=$(command -v python3)
+            echo "python3 resolves to: $resolved"
+            case "$resolved" in
+              /opt/gitlab/embedded/bin/python3)
+                echo "OK: still shadowed by omnibus, ci-python is still required" ;;
+              *)
+                echo "CHANGED: python3 now resolves elsewhere - re-evaluate Layer 2d"; exit 1 ;;
+            esac
+          '
 
       - name: Assert the runner shim is actually WIRED IN as CMD
         run: |
